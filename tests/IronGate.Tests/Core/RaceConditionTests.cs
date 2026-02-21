@@ -67,6 +67,46 @@ public class RaceConditionTests(ITestOutputHelper output)
     }
 
     // -------------------------------------------------------------------------
+    // Scenario 2b: Same as above but with full instrumentation so you can SEE
+    // every read and write happening in real time
+    // -------------------------------------------------------------------------
+
+    [Fact]
+    public async Task TOCTOU_Instrumented_ShowsAllReadsBeforeAnyWrite()
+    {
+        var start = DateTime.UtcNow;
+        string Elapsed() => $"+{(DateTime.UtcNow - start).TotalMilliseconds:F0}ms".PadRight(8);
+
+        var store = new InstrumentedStore(
+            delayMs: 30,
+            onGet: (key, count) =>
+                output.WriteLine($"  [{Elapsed()}] GET  → read count={count}"),
+            onSet: (key, count) =>
+                output.WriteLine($"  [{Elapsed()}] SET  → wrote count={count}  ← overwrites previous!")
+        );
+
+        var service = new RateLimiterService(store, new FixedWindowAlgorithm());
+
+        output.WriteLine("--- Firing 10 concurrent requests (limit=5, delay=30ms) ---");
+        output.WriteLine("");
+
+        var tasks = Enumerable.Range(0, 10)
+            .Select(_ => service.EvaluateAsync("client", "/api/test", _rule))
+            .ToArray();
+
+        var results = await Task.WhenAll(tasks);
+        var allowed = results.Count(r => r.IsAllowed);
+
+        output.WriteLine("");
+        output.WriteLine($"  Final count in store : {store.CurrentCount}  (should be {Math.Min(10, _rule.MaxRequests)})");
+        output.WriteLine($"  Requests allowed     : {allowed}/10  (limit was {_rule.MaxRequests})");
+        output.WriteLine("");
+        output.WriteLine("  Notice: all GETs complete before any SET — that is the race window.");
+
+        Assert.True(allowed > 5);
+    }
+
+    // -------------------------------------------------------------------------
     // Scenario 3: ConcurrentDictionary alone doesn't fix TOCTOU either
     // -------------------------------------------------------------------------
 
@@ -93,6 +133,31 @@ public class RaceConditionTests(ITestOutputHelper output)
 // ---------------------------------------------------------------------------
 // Test helpers — unsafe store implementations used only in these tests
 // ---------------------------------------------------------------------------
+
+/// <summary>
+/// Instrumented store that calls back on every read and write so you can observe the race in real time.
+/// </summary>
+file sealed class InstrumentedStore(int delayMs, Action<string, int> onGet, Action<string, int> onSet) : IRateLimitStore
+{
+    private readonly System.Collections.Concurrent.ConcurrentDictionary<string, (int Count, DateTime ExpiresAt)> _store = new();
+
+    public int CurrentCount => _store.TryGetValue("/api/test:/api/test:client", out var e) ? e.Count
+        : _store.FirstOrDefault().Value.Count;
+
+    public Task<int> GetAsync(string key)
+    {
+        var count = _store.TryGetValue(key, out var e) && e.ExpiresAt > DateTime.UtcNow ? e.Count : 0;
+        onGet(key, count);
+        return Task.FromResult(count);
+    }
+
+    public async Task SetAsync(string key, int count, TimeSpan expiry)
+    {
+        await Task.Delay(delayMs);
+        _store[key] = (count, DateTime.UtcNow.Add(expiry));
+        onSet(key, count);
+    }
+}
 
 /// <summary>
 /// Intentionally unsafe store using plain Dictionary — demonstrates corruption under concurrency.
