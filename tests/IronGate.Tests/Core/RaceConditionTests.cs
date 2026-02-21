@@ -10,6 +10,10 @@ public class RaceConditionTests(ITestOutputHelper output)
 {
     private readonly RateLimitRule _rule = new(maxRequests: 5, window: TimeSpan.FromMinutes(1));
 
+    // AsyncLocal flows with async continuations across thread switches
+    // Check this in Watch/Locals panel while debugging to know which request you're in
+    private static readonly AsyncLocal<int> _currentRequestId = new();
+
     // -------------------------------------------------------------------------
     // Scenario 1: Plain Dictionary — can corrupt or throw under concurrent writes
     // -------------------------------------------------------------------------
@@ -80,9 +84,9 @@ public class RaceConditionTests(ITestOutputHelper output)
         var store = new InstrumentedStore(
             delayMs: 30,
             onGet: (key, count) =>
-                output.WriteLine($"  [{Elapsed()}] GET  → read count={count}"),
+                output.WriteLine($"  [{Elapsed()}] Request-{_currentRequestId.Value} GET → read count={count}"),
             onSet: (key, count) =>
-                output.WriteLine($"  [{Elapsed()}] SET  → wrote count={count}  ← overwrites previous!")
+                output.WriteLine($"  [{Elapsed()}] Request-{_currentRequestId.Value} SET → wrote count={count}  ← overwrites previous!")
         );
 
         var service = new RateLimiterService(store, new FixedWindowAlgorithm());
@@ -91,7 +95,17 @@ public class RaceConditionTests(ITestOutputHelper output)
         output.WriteLine("");
 
         var tasks = Enumerable.Range(0, 10)
-            .Select(_ => service.EvaluateAsync("client", "/api/test", _rule))
+            .Select(i => Task.Run(async () =>
+            {
+                // Name the thread so it shows as "Request-N" in the Threads panel
+                Thread.CurrentThread.Name = $"Request-{i}";
+
+                // AsyncLocal flows across awaits — check _currentRequestId.Value
+                // in Watch/Locals to know which request you're inside after any await
+                _currentRequestId.Value = i;
+
+                return await service.EvaluateAsync("client", "/api/test", _rule);
+            }))
             .ToArray();
 
         var results = await Task.WhenAll(tasks);
