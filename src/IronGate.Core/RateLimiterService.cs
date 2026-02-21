@@ -1,13 +1,14 @@
 using IronGate.Core.Abstractions;
 using IronGate.Core.Models;
 
+
 namespace IronGate.Core;
 
 /// <summary>
 /// Orchestrates rate limiting — delegates storage to <see cref="IRateLimitStore"/>
 /// and evaluation logic to <see cref="IRateLimitAlgorithm"/>.
 /// </summary>
-public class RateLimiterService
+public class RateLimiterService : IRateLimiterService
 {
     private readonly IRateLimitStore _store;
     private readonly IRateLimitAlgorithm _algorithm;
