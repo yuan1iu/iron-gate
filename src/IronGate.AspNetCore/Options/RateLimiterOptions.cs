@@ -25,5 +25,5 @@ public sealed class RateLimiterOptions
     /// </summary>
     /// <param name="endpoint">The endpoint path of the incoming request.</param>
     public RateLimitRule? GetRule(string endpoint) =>
-        _rules.TryGetValue(endpoint, out var rule) ? rule : null;
+        _rules.GetValueOrDefault(endpoint);
 }
